@@ -1,3 +1,3 @@
-FROM MacOSVenturaBaseImage
+FROM test
 
 RUN brew install gcc
