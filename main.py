@@ -53,25 +53,40 @@ class Chmoker:
             dest="image_action", help="Action to do with image"
         )
         image_subparsers.required = True
-        image_action_parser = image_subparsers.add_parser("create")
-        image_action_parser.add_argument("-t", "--tag", help="Image tag", required=True)
-        image_action_parser.add_argument(
+        image_create_parser = image_subparsers.add_parser("create")
+        image_create_parser.add_argument("-t", "--tag", help="Image tag", required=True)
+        image_create_parser.add_argument(
             "--recreate",
             dest="image_recreate",
             action="store_true",
             help="Force recreate image",
             default=False,
         )
-        image_action_parser.add_argument(
+        image_create_parser.add_argument(
             "--no-tar",
             dest="image_no_tar",
             action="store_true",
             help="Do not produce tar archive",
             default=False,
         )
+        image_create_parser.add_argument(
+            "--no-brew",
+            dest="image_no_brew",
+            action="store_true",
+            help="Do not install Brew into the image",
+            default=False,
+        )
+        image_ls_parser = image_subparsers.add_parser("ls")
 
         build_parser = action_subparsers.add_parser("build")
         build_parser.add_argument("-t", "--tag", help="Image tag", required=True)
+        build_parser.add_argument(
+            "--refresh",
+            dest="build_force_refresh",
+            action="store_true",
+            help="Force refresh already unpacked image",
+            default=False,
+        )
 
         run_parser = action_subparsers.add_parser("run")
         run_parser.add_argument("tag", help="Image tag")
@@ -80,6 +95,20 @@ class Chmoker:
             dest="run_remove_after",
             action="store_true",
             help="Remove container after run",
+            default=False,
+        )
+        run_parser.add_argument(
+            "--it",
+            dest="run_interactive",
+            action="store_true",
+            help="Run command in interactive mode",
+            default=False,
+        )
+        run_parser.add_argument(
+            "--refresh",
+            dest="run_force_refresh",
+            action="store_true",
+            help="Force refresh already unpacked image",
             default=False,
         )
         run_parser.add_argument(
@@ -121,11 +150,15 @@ class Chmoker:
 
     def parse_instr(self, image_tag, instr):
         command = instr["instruction"]
+        full_line = instr["content"]
         if command == "COMMENT":
             return
         if command == "FROM":
-            return
-        self.exec_in_chroot(image_tag, f"sh -c 'echo {command}'")
+            return  # TODO: implement
+        if command == "RUN":
+            logging.info(full_line)
+            command_value = instr["value"]
+            self.exec_in_chroot(image_tag, command_value)
 
     def unpack_image(self, image_tag):
         image_orig_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{image_tag}.tar")
@@ -139,9 +172,10 @@ class Chmoker:
         tar.extractall(path=image_mount_path)
         tar.close()
 
-    def prepare_chroot(self, image_tag):
+    def prepare_chroot(self, image_tag, force_refresh=False):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
-        # self.unpack_image()
+        if not image_mount_path.exists() or force_refresh:
+            self.unpack_image(image_tag)
         logging.info(f"Addind hardlink to mDNSResponder to {image_tag}")
         image_mount_dns_responder_path = image_mount_path / Path(
             "var/run/mDNSResponder"
@@ -152,20 +186,26 @@ class Chmoker:
         logging.info(f"Mounting devfs to {image_tag}")
         self.exec_in_chroot(image_tag, "mount -t devfs devfs /dev")
 
-    def exec_in_chroot(self, image_tag, command):
+    def exec_in_chroot(self, image_tag, command, run_interactive=False):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
         env_vars = [
-            "HOME=/root",
+            "HOME=/",
             'TERM="$TERM"',
             "PS1='\\u:\w\$ '",
-            'PATH="$PATH"',
+            'PATH="/opt/homebrew/bin:/opt/homebrew/sbin${PATH+:$PATH}"',
             "TMPDIR=/tmp",
             "HOMEBREW_CELLAR=/opt/homebrew/Cellar",
             "HOMEBREW_PREFIX=/opt/homebrew",
             "HOMEBREW_REPOSITORY=/opt/homebrew",
+            "NONINTERACTIVE=1",
         ]
         env_vars_str = " ".join(env_vars)
-        os.system(f"chroot {image_mount_path} env -i {env_vars_str} {command}")
+        status = os.system(
+            f"chroot {image_mount_path} env -i {env_vars_str} {command}"
+        )  # TODO: interactive cond
+        exit_code = os.waitstatus_to_exitcode(status)
+        if exit_code != 0 and not run_interactive:
+            raise Exception(f"Command '{command}' exited with code {exit_code}")
 
     def destroy_chroot(self, image_tag):
         logging.info(f"Destroying chroot of {image_tag}")
@@ -183,9 +223,11 @@ class Chmoker:
         logging.info("Building image..")
         dfp = DockerfileParser()
         image_tag = dfp.baseimage
-        self.prepare_chroot(image_tag)
-        [self.parse_instr(image_tag, x) for x in dfp.structure]
-        self.destroy_chroot(image_tag)
+        self.prepare_chroot(image_tag, self.args.build_force_refresh)
+        try:
+            [self.parse_instr(image_tag, x) for x in dfp.structure]
+        finally:
+            self.destroy_chroot(image_tag)
 
     def copy_dyld_libs_to_image(self, image_mount_path):
         lib_target_dir = image_mount_path / Path("System/Library/dyld")
@@ -212,6 +254,8 @@ class Chmoker:
         if tmp_dir_path.exists():
             os.remove(tmp_dir_path)
         os.symlink("/private/tmp", tmp_dir_path)
+        docker_env_path = image_mount_path / Path(".dockerenv")
+        docker_env_path.touch()
 
     def create_system_image(self):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
@@ -226,18 +270,38 @@ class Chmoker:
         self.copy_dyld_libs_to_image(image_mount_path)
         self.copy_system_to_image(image_mount_path)
         self.create_system_stuff(image_mount_path)
+        if not self.args.image_no_brew:
+            self.install_brew_into_image(image_mount_path)
         if not self.args.image_no_tar:
             self.create_tar_archive(image_tar_path, image_mount_path)
+
+    def install_brew_into_image(self, image_mount_path):
+        logging.info(f"Installing brew into {self.args.tag}")
+        brew_install_cmd = 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+        self.prepare_chroot(self.args.tag)
+        self.exec_in_chroot(self.args.tag, brew_install_cmd)
+        self.destroy_chroot(self.args.tag)
+
+    def image_ls(self):
+        images_dir_tar_items = sorted(os.listdir(CHMOCKER_BASE_IMAGES_DIR_PATH))
+        images_dir_mounted_items = sorted(os.listdir(CHMOCKER_MOUNT_IMAGES_DIR_PATH))
+        print("Images (as .tar):")
+        for n, item in enumerate(images_dir_tar_items):
+            print(n + 1, item)
+        print()
+        print("Images (mounted):")
+        for n, item in enumerate(images_dir_mounted_items):
+            print(n + 1, item)
 
     def image(self):
         if self.args.image_action == "create":
             self.create_system_image()
-        else:
-            raise Exception("Not implemented")
+        elif self.args.image_action == "ls":
+            self.image_ls()
 
     def run(self):
-        self.prepare_chroot(self.args.tag)
-        self.exec_in_chroot(self.args.tag, self.args.command)
+        self.prepare_chroot(self.args.tag, self.args.run_force_refresh)
+        self.exec_in_chroot(self.args.tag, self.args.command, self.args.run_interactive)
         self.destroy_chroot(self.args.tag)
         if self.args.run_remove_after:
             pass
@@ -245,9 +309,9 @@ class Chmoker:
     def main(self):
         if self.args.action == "build":
             self.build()
-        if self.args.action == "image":
+        elif self.args.action == "image":
             self.image()
-        if self.args.action == "run":
+        elif self.args.action == "run":
             self.run()
 
 

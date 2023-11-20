@@ -1,3 +1,3 @@
 FROM test
 
-RUN brew install gcc
+RUN brew install ag
