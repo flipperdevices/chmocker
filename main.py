@@ -7,7 +7,9 @@ import logging
 import argparse
 import shutil
 import subprocess
+import validators
 from pathlib import Path
+from urllib.request import urlretrieve
 from dockerfile_parse import DockerfileParser
 
 CHMOCKER_DIR_NAME = ".chmo"
@@ -148,17 +150,44 @@ class Chmoker:
         logger.setLevel(logging.INFO)
         self.args = self.parse_args()
 
+    def parse_add_instr(self, image_tag, command_value):
+        image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
+        src, dst = command_value.split()
+        target_path = image_mount_path / Path(dst.strip("/"))
+        os.makedirs(target_path, exist_ok=True)
+        if validators.url(src):
+            filename = Path(src).name
+            urlretrieve(src, target_path / Path(filename))
+        else:
+            src_path = Path(src)
+            if not src_path.exists():
+                raise Exception(f"No such file or directory {src})")
+            if os.path.isdir(src_path):
+                target_dir_path = target_path / Path(src_path.name)
+                shutil.copytree(src_path, f"{target_dir_path}/", dirs_exist_ok=True)
+            elif os.path.isfile(src_path):
+                if tarfile.is_tarfile(src_path):
+                    tar = tarfile.open(src_path)
+                    tar.extractall(path=target_path)
+                    tar.close()
+                else:
+                    shutil.copy2(src_path, f"{target_path}/")
+            else:
+                raise Exception(f"Failed to parse {src})")
+
     def parse_instr(self, image_tag, instr):
         command = instr["instruction"]
-        full_line = instr["content"]
         if command == "COMMENT":
             return
         if command == "FROM":
             return  # TODO: implement
+        full_line = instr["content"].replace("\n", "")
+        command_value = instr["value"]
+        print(full_line)
         if command == "RUN":
-            logging.info(full_line)
-            command_value = instr["value"]
             self.exec_in_chroot(image_tag, command_value)
+        elif command == "ADD":
+            self.parse_add_instr(image_tag, command_value)
 
     def unpack_image(self, image_tag):
         image_orig_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{image_tag}.tar")
@@ -240,8 +269,10 @@ class Chmoker:
 
     def copy_system_to_image(self, image_mount_path):
         for path in CHMOCKER_SYSTEM_IMAGE_PATHS:
-            target_path = image_mount_path / Path(path.strip("/"))
-            target_dir = target_path.parents[0]  # removing leading slash
+            target_path = image_mount_path / Path(
+                path.strip("/")
+            )  # removing leading slash
+            target_dir = target_path.parents[0]
             logging.info(f"Copying {path} to {target_dir}/..")
             os.makedirs(target_dir, exist_ok=True)
             self.copy_with_metadata(path, f"{target_dir}/")
