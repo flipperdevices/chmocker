@@ -37,7 +37,7 @@ CHMOCKER_SYSTEM_IMAGE_PATHS = (
     "/System/Library/CoreServices/SystemVersionCompat.plist",
     "/System/Library/Frameworks",
     "/System/Library/Perl",
-    "/Library/Developer/CommandLineTools",
+    # "/Library/Developer/CommandLineTools",
     "/usr/libexec/rosetta",
     "/Library/Apple/usr/libexec/oah",
 )
@@ -131,16 +131,6 @@ class Chmoker:
     def get_size_str(path):
         return subprocess.check_output(["du", "-sh", path]).split()[0].decode("utf-8")
 
-    @staticmethod
-    def create_tar_archive(tar_path, source_path):
-        logging.info(f"Creating tar archive {tar_path}..")
-        tar = tarfile.open(tar_path, "w")
-        for root_dir_item in os.listdir(source_path):
-            root_dir_item_path = source_path / Path(root_dir_item)
-            tar.add(root_dir_item_path, root_dir_item)
-        tar.close()
-        logging.info(f"Image tar size {self.get_size_str(image_tar_path)}")
-
     def __init__(self):
         self.check_root()
         os.makedirs(CHMOCKER_DIR_PATH, exist_ok=True)
@@ -189,22 +179,29 @@ class Chmoker:
         elif command == "ADD":
             self.parse_add_instr(image_tag, command_value)
 
-    def unpack_image(self, image_tag):
-        image_orig_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{image_tag}.tar")
-        image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
+    def unpack_image(self, base_image_tag, new_image_tag, force_refresh=False):
+        image_orig_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{base_image_tag}.tar")
+        image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(new_image_tag)
         logging.info(f"Unpacking base image {image_orig_path} to {image_mount_path}")
         if not image_orig_path.exists():
-            raise Exception(f"Image {image_orig_path} not found!")
+            raise Exception(f"Base image {image_orig_path} not found!")
         if image_mount_path.exists():
+            if not force_refresh:
+                if base_image_tag != new_image_tag:
+                    logging.warning(
+                        f"Image {new_image_tag} is already exist, skipping to unpack.."
+                    )
+                return
             os.remove(image_mount_path)
+            logging.warning(f"Image {new_image_tag} is already exist, removing..")
         tar = tarfile.open(image_orig_path)
         tar.extractall(path=image_mount_path)
         tar.close()
 
-    def prepare_chroot(self, image_tag, force_refresh=False):
+    def prepare_chroot(self, image_tag):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
-        if not image_mount_path.exists() or force_refresh:
-            self.unpack_image(image_tag)
+        if not image_mount_path.exists():
+            raise Exception(f"Image {image_mount_path} not unpacked or not exist!")
         logging.info(f"Addind hardlink to mDNSResponder to {image_tag}")
         image_mount_dns_responder_path = image_mount_path / Path(
             "var/run/mDNSResponder"
@@ -213,7 +210,8 @@ class Chmoker:
             os.remove(image_mount_dns_responder_path)
         os.link(Path("/var/run/mDNSResponder"), image_mount_dns_responder_path)
         logging.info(f"Mounting devfs to {image_tag}")
-        self.exec_in_chroot(image_tag, "mount -t devfs devfs /dev")
+        image_devfs_mount_path = image_mount_path / Path("dev")
+        os.system(f"mount -t devfs devfs {image_devfs_mount_path}")
 
     def exec_in_chroot(self, image_tag, command, run_interactive=False):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
@@ -245,18 +243,37 @@ class Chmoker:
         if image_mount_dns_responder_path.exists():
             logging.info(f"Removing hardlink to mDNSResponder from {image_tag}")
             os.remove(image_mount_dns_responder_path)
-        logging.info(f"Umounting devfs to {image_tag}")
-        self.exec_in_chroot(image_tag, "umount /dev")
+        logging.info(f"Umounting devfs from {image_tag}")
+        image_devfs_mount_path = image_mount_path / Path("dev")
+        os.system(f"umount {image_devfs_mount_path}")
 
     def build(self):
         logging.info("Building image..")
         dfp = DockerfileParser()
         image_tag = dfp.baseimage
-        self.prepare_chroot(image_tag, self.args.build_force_refresh)
+        image_new_tag = self.args.tag
+        self.unpack_image(
+            image_tag, image_new_tag, force_refresh=self.args.build_force_refresh
+        )
+        self.prepare_chroot(image_new_tag)
         try:
-            [self.parse_instr(image_tag, x) for x in dfp.structure]
+            [self.parse_instr(image_new_tag, x) for x in dfp.structure]
         finally:
-            self.destroy_chroot(image_tag)
+            self.destroy_chroot(image_new_tag)
+            image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
+            image_tar_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(
+                f"{self.args.tag}.tar"
+            )
+            self.create_tar_archive(image_tar_path, image_mount_path)
+
+    def create_tar_archive(self, tar_path, source_path):
+        logging.info(f"Creating tar archive {tar_path}..")
+        tar = tarfile.open(tar_path, "w")
+        for root_dir_item in os.listdir(source_path):
+            root_dir_item_path = source_path / Path(root_dir_item)
+            tar.add(root_dir_item_path, root_dir_item)
+        tar.close()
+        logging.info(f"Image tar size {self.get_size_str(tar_path)}")
 
     def copy_dyld_libs_to_image(self, image_mount_path):
         lib_target_dir = image_mount_path / Path("System/Library/dyld")
@@ -277,6 +294,17 @@ class Chmoker:
             os.makedirs(target_dir, exist_ok=True)
             self.copy_with_metadata(path, f"{target_dir}/")
 
+    def copy_command_line_tools_to_image(self, image_mount_path):
+        # Temp function to override my system cmd tools to version 11.3
+        cmd_tools_dst_path = image_mount_path / Path(
+            "Library/Developer/CommandLineTools"
+        )
+        if not cmd_tools_dst_path.exists():
+            os.makedirs(cmd_tools_dst_path, exist_ok=True)
+            self.copy_with_metadata(
+                Path("CommandLineTools11"), f"{cmd_tools_dst_path}/"
+            )
+
     def create_system_stuff(self, image_mount_path):
         os.makedirs(image_mount_path / Path("var/run"), exist_ok=True)
         os.makedirs(image_mount_path / Path("dev"), exist_ok=True)
@@ -293,13 +321,15 @@ class Chmoker:
         if image_mount_path.exists():
             if not self.args.image_recreate:
                 logging.warning(
-                    f"Image {self.args.tag} is already created, skipping.. Use '--recreate' flag to recreate"
+                    f"Image {self.args.tag} is already created, skipping.. "
+                    "Use '--recreate' flag to recreate"
                 )
                 return
         logging.info(f"Creating image {self.args.tag}..")
         image_tar_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{self.args.tag}.tar")
         self.copy_dyld_libs_to_image(image_mount_path)
         self.copy_system_to_image(image_mount_path)
+        self.copy_command_line_tools(image_mount_path)
         self.create_system_stuff(image_mount_path)
         if not self.args.image_no_brew:
             self.install_brew_into_image(image_mount_path)
@@ -331,7 +361,8 @@ class Chmoker:
             self.image_ls()
 
     def run(self):
-        self.prepare_chroot(self.args.tag, self.args.run_force_refresh)
+        self.unpack_image(self.args.tag, self.args.tag, self.args.run_force_refresh)
+        self.prepare_chroot(self.args.tag)
         self.exec_in_chroot(self.args.tag, self.args.command, self.args.run_interactive)
         self.destroy_chroot(self.args.tag)
         if self.args.run_remove_after:
