@@ -73,6 +73,13 @@ class Chmoker:
             default=False,
         )
         image_create_parser.add_argument(
+            "--no-remove",
+            dest="image_no_remove",
+            action="store_true",
+            help="Do not remove unpacked image",
+            default=False,
+        )
+        image_create_parser.add_argument(
             "--no-brew",
             dest="image_no_brew",
             action="store_true",
@@ -94,7 +101,14 @@ class Chmoker:
             "--no-tar",
             dest="build_no_tar",
             action="store_true",
-            help="Do not produce tar archive and do not remove unpacked",
+            help="Do not produce tar archive",
+            default=False,
+        )
+        build_parser.add_argument(
+            "--no-remove",
+            dest="build_no_remove",
+            action="store_true",
+            help="Do not remove unpacked image",
             default=False,
         )
 
@@ -311,6 +325,7 @@ class Chmoker:
             )
             if not self.args.build_no_tar:
                 self.create_tar_archive(image_tar_path, image_mount_path)
+            if not self.args.build_no_remove:
                 self.remove_recursive_force(image_mount_path)
 
     def create_tar_archive(self, tar_path, source_path):
@@ -381,6 +396,7 @@ class Chmoker:
             self.install_brew_into_image(image_mount_path)
         if not self.args.image_no_tar:
             self.create_tar_archive(image_tar_path, image_mount_path)
+        if not self.args.image_no_remove:
             self.remove_recursive_force(image_mount_path)
 
     def install_brew_into_image(self, image_mount_path):
