@@ -11,6 +11,7 @@ import validators
 from pathlib import Path
 from urllib.request import urlretrieve
 from dockerfile_parse import DockerfileParser
+from termcolor import colored
 
 CHMOCKER_DIR_NAME = ".chmo"
 CHMOCKER_DIR_PATH = Path.home() / CHMOCKER_DIR_NAME
@@ -68,7 +69,7 @@ class Chmoker:
             "--no-tar",
             dest="image_no_tar",
             action="store_true",
-            help="Do not produce tar archive",
+            help="Do not produce tar archive and do not remove unpacked",
             default=False,
         )
         image_create_parser.add_argument(
@@ -87,6 +88,13 @@ class Chmoker:
             dest="build_force_refresh",
             action="store_true",
             help="Force refresh already unpacked image",
+            default=False,
+        )
+        build_create_parser.add_argument(
+            "--no-tar",
+            dest="build_no_tar",
+            action="store_true",
+            help="Do not produce tar archive and do not remove unpacked",
             default=False,
         )
 
@@ -131,6 +139,16 @@ class Chmoker:
     def get_size_str(path):
         return subprocess.check_output(["du", "-sh", path]).split()[0].decode("utf-8")
 
+    @staticmethod
+    def remove_recursive_force(path):
+        logging.info(f"Removing {path}..")
+        if os.path.islink(path):
+            os.unlink(path)
+        elif os.path.isfile(path):
+            os.remove(path)
+        else:
+            shutil.rmtree(path)
+
     def __init__(self):
         self.check_root()
         os.makedirs(CHMOCKER_DIR_PATH, exist_ok=True)
@@ -165,6 +183,30 @@ class Chmoker:
             else:
                 raise Exception(f"Failed to parse {src})")
 
+    def parse_copy_instr(self, image_tag, command_value):
+        if command_value.startswith("--from"):
+            previous_stage, src, dst = command_value.split()
+            previous_stage = previous_stage.split("--from=")[1]
+            image_previous_stage_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(
+                f"{previous_stage}.tar"
+            )
+            tar = tarfile.open(image_previous_stage_path)
+            src_path = src.strip("/")
+            subdir_and_files = [
+                tarinfo
+                for tarinfo in tar.getmembers()
+                if tarinfo.name.startswith(src_path)
+            ]
+            if not subdir_and_files:
+                raise Exception(f"Path {src} not found in {previous_stage}")
+            image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
+            target_path = image_mount_path / Path(dst.strip("/"))
+            tar.extractall(path=image_mount_path, members=subdir_and_files)
+            tar.close()
+        else:
+            src, dst = command_value.split()
+            raise Exception(f"Not implemented")
+
     def parse_instr(self, image_tag, instr):
         command = instr["instruction"]
         if command == "COMMENT":
@@ -173,11 +215,13 @@ class Chmoker:
             return  # TODO: implement
         full_line = instr["content"].replace("\n", "")
         command_value = instr["value"]
-        print(full_line)
+        print(colored(full_line, "yellow"))
         if command == "RUN":
             self.exec_in_chroot(image_tag, command_value)
         elif command == "ADD":
             self.parse_add_instr(image_tag, command_value)
+        elif command == "COPY":
+            self.parse_copy_instr(image_tag, command_value)
 
     def unpack_image(self, base_image_tag, new_image_tag, force_refresh=False):
         image_orig_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{base_image_tag}.tar")
@@ -192,7 +236,7 @@ class Chmoker:
                         f"Image {new_image_tag} is already exist, skipping to unpack.."
                     )
                 return
-            os.remove(image_mount_path)
+            self.remove_recursive_force(image_mount_path)
             logging.warning(f"Image {new_image_tag} is already exist, removing..")
         tar = tarfile.open(image_orig_path)
         tar.extractall(path=image_mount_path)
@@ -216,7 +260,7 @@ class Chmoker:
     def exec_in_chroot(self, image_tag, command, run_interactive=False):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
         env_vars = [
-            "HOME=/",
+            "HOME=/root",
             'TERM="$TERM"',
             "PS1='\\u:\w\$ '",
             'PATH="/opt/homebrew/bin:/opt/homebrew/sbin${PATH+:$PATH}"',
@@ -224,6 +268,7 @@ class Chmoker:
             "HOMEBREW_CELLAR=/opt/homebrew/Cellar",
             "HOMEBREW_PREFIX=/opt/homebrew",
             "HOMEBREW_REPOSITORY=/opt/homebrew",
+            "HOMEBREW_TEMP=/tmp",
             "NONINTERACTIVE=1",
         ]
         env_vars_str = " ".join(env_vars)
@@ -264,7 +309,9 @@ class Chmoker:
             image_tar_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(
                 f"{self.args.tag}.tar"
             )
-            self.create_tar_archive(image_tar_path, image_mount_path)
+            if not self.args.build_no_tar:
+                self.create_tar_archive(image_tar_path, image_mount_path)
+                self.remove_recursive_force(image_mount_path)
 
     def create_tar_archive(self, tar_path, source_path):
         logging.info(f"Creating tar archive {tar_path}..")
@@ -295,23 +342,22 @@ class Chmoker:
             self.copy_with_metadata(path, f"{target_dir}/")
 
     def copy_command_line_tools_to_image(self, image_mount_path):
+        logging.info(f"Copying command line tools to {image_mount_path}/..")
         # Temp function to override my system cmd tools to version 11.3
         cmd_tools_dst_path = image_mount_path / Path(
-            "Library/Developer/CommandLineTools"
+            "Library/Developer/CommandLineTools/"
         )
-        if not cmd_tools_dst_path.exists():
-            os.makedirs(cmd_tools_dst_path, exist_ok=True)
-            self.copy_with_metadata(
-                Path("CommandLineTools11"), f"{cmd_tools_dst_path}/"
-            )
+        os.makedirs(cmd_tools_dst_path, exist_ok=True)
+        self.copy_with_metadata(Path("CommandLineTools11/*"), f"{cmd_tools_dst_path}/")
 
     def create_system_stuff(self, image_mount_path):
+        os.makedirs(image_mount_path / Path("root"), exist_ok=True)
         os.makedirs(image_mount_path / Path("var/run"), exist_ok=True)
         os.makedirs(image_mount_path / Path("dev"), exist_ok=True)
         os.makedirs(image_mount_path / Path("private/tmp"), exist_ok=True)
         tmp_dir_path = image_mount_path / Path("tmp")
         if tmp_dir_path.exists():
-            os.remove(tmp_dir_path)
+            self.remove_recursive_force(tmp_dir_path)
         os.symlink("/private/tmp", tmp_dir_path)
         docker_env_path = image_mount_path / Path(".dockerenv")
         docker_env_path.touch()
@@ -329,12 +375,13 @@ class Chmoker:
         image_tar_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{self.args.tag}.tar")
         self.copy_dyld_libs_to_image(image_mount_path)
         self.copy_system_to_image(image_mount_path)
-        self.copy_command_line_tools(image_mount_path)
+        self.copy_command_line_tools_to_image(image_mount_path)
         self.create_system_stuff(image_mount_path)
         if not self.args.image_no_brew:
             self.install_brew_into_image(image_mount_path)
         if not self.args.image_no_tar:
             self.create_tar_archive(image_tar_path, image_mount_path)
+            self.remove_recursive_force(image_mount_path)
 
     def install_brew_into_image(self, image_mount_path):
         logging.info(f"Installing brew into {self.args.tag}")
@@ -366,7 +413,8 @@ class Chmoker:
         self.exec_in_chroot(self.args.tag, self.args.command, self.args.run_interactive)
         self.destroy_chroot(self.args.tag)
         if self.args.run_remove_after:
-            pass
+            image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
+            self.remove_recursive_force(image_mount_path)
 
     def main(self):
         if self.args.action == "build":
