@@ -90,7 +90,7 @@ class Chmoker:
             help="Force refresh already unpacked image",
             default=False,
         )
-        build_create_parser.add_argument(
+        build_parser.add_argument(
             "--no-tar",
             dest="build_no_tar",
             action="store_true",
