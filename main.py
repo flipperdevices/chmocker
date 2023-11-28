@@ -241,8 +241,6 @@ class Chmoker:
         image_orig_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{base_image_tag}.tar")
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(new_image_tag)
         logging.info(f"Unpacking base image {image_orig_path} to {image_mount_path}")
-        if not image_orig_path.exists():
-            raise Exception(f"Base image {image_orig_path} not found!")
         if image_mount_path.exists():
             if not force_refresh:
                 if base_image_tag != new_image_tag:
@@ -250,8 +248,11 @@ class Chmoker:
                         f"Image {new_image_tag} is already exist, skipping to unpack.."
                     )
                 return
-            self.remove_recursive_force(image_mount_path)
-            logging.warning(f"Image {new_image_tag} is already exist, removing..")
+            if image_orig_path.exists():
+                logging.warning(f"Image {new_image_tag} is already exist, removing..")
+                self.remove_recursive_force(image_mount_path)
+        if not image_orig_path.exists():
+            raise Exception(f"Base image {image_orig_path} not found!")
         tar = tarfile.open(image_orig_path)
         tar.extractall(path=image_mount_path)
         tar.close()
@@ -284,6 +285,8 @@ class Chmoker:
             "HOMEBREW_REPOSITORY=/opt/homebrew",
             "HOMEBREW_TEMP=/tmp",
             "NONINTERACTIVE=1",
+            "SHELL=/bin/bash",
+            "CONFIG_SHELL=/bin/bash"
         ]
         env_vars_str = " ".join(env_vars)
         status = os.system(
