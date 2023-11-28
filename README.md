@@ -1,6 +1,6 @@
 # Chmocker
 
-Chmocker (chroot + docker) is yet another try to create MacOS containers. Chmocker accepts the classic Dockerfile format and allows you to have an isolated environment on MacOS computers. Created for building [Flipper Zero Embedded toolchain]()
+Chmocker (chroot + docker) is yet another try to create MacOS containers. Chmocker accepts the classic Dockerfile format and allows you to have an isolated environment on MacOS computers. Created for building [Flipper Zero Embedded toolchain](https://github.com/flipperdevices/flipperzero-toolchain)
 
 ## How it works
 - FS layers made through tar images (very slow, way to discover - [APFS snapshots](https://github.com/ahl/apfs/tree/master))
