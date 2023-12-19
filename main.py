@@ -136,6 +136,13 @@ class Chmoker:
             default=False,
         )
         run_parser.add_argument(
+            "-e",
+            dest="run_extra_envs",
+            action="append",
+            help="Extra container environment variables",
+            default=[],
+        )
+        run_parser.add_argument(
             "command", help="Command to execute", nargs="?", default=None
         )
         return parser.parse_args()
@@ -272,7 +279,7 @@ class Chmoker:
         image_devfs_mount_path = image_mount_path / Path("dev")
         os.system(f"mount -t devfs devfs {image_devfs_mount_path}")
 
-    def exec_in_chroot(self, image_tag, command, run_interactive=False):
+    def exec_in_chroot(self, image_tag, command, run_interactive=False, extra_envs=[]):
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_tag)
         env_vars = [
             "HOME=/root",
@@ -286,8 +293,9 @@ class Chmoker:
             "HOMEBREW_TEMP=/tmp",
             "NONINTERACTIVE=1",
             "SHELL=/bin/bash",
-            "CONFIG_SHELL=/bin/bash"
+            "CONFIG_SHELL=/bin/bash",
         ]
+        env_vars += extra_envs
         env_vars_str = " ".join(env_vars)
         status = os.system(
             f"chroot {image_mount_path} env -i {env_vars_str} {command}"
@@ -429,7 +437,12 @@ class Chmoker:
     def run(self):
         self.unpack_image(self.args.tag, self.args.tag, self.args.run_force_refresh)
         self.prepare_chroot(self.args.tag)
-        self.exec_in_chroot(self.args.tag, self.args.command, self.args.run_interactive)
+        self.exec_in_chroot(
+            self.args.tag,
+            self.args.command,
+            self.args.run_interactive,
+            self.args.run_extra_envs,
+        )
         self.destroy_chroot(self.args.tag)
         if self.args.run_remove_after:
             image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
