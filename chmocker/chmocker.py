@@ -634,26 +634,6 @@ class Chmoker:
             image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
             self.remove_recursive_force(image_mount_path)
 
-            # with open(CHMOKER_INDEX_FILE_PATH, 'r+') as index_file:
-            #     index_file_json = json.load(index_file)
-            #
-            #     stage_data = index_file_json.get(self.args.tag)
-            #
-            #     stage_hash = stage_data['hash']
-            #
-            # self.unpack_image(stage_hash, stage_hash, self.args.run_force_refresh)
-            # self.prepare_chroot(stage_hash)
-            # self.exec_in_chroot(
-            #     stage_hash,
-            #     self.args.command,
-            #     self.args.run_interactive,
-            #     self.args.run_extra_envs,
-            # )
-            # self.destroy_chroot(stage_hash)
-            # if self.args.run_remove_after:
-            #     image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(stage_hash)
-            #     self.remove_recursive_force(image_mount_path)
-
     def main(self):
         if self.args.action == "build":
             self.build()
@@ -661,8 +641,3 @@ class Chmoker:
             self.image()
         elif self.args.action == "run":
             self.run()
-
-
-if __name__ == "__main__":
-    chmo = Chmoker()
-    chmo.main()
