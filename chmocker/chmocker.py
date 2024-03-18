@@ -327,20 +327,22 @@ class Chmoker:
         logging.info(f"Image tar size {self.get_size_str(destination_path)}")
 
     def build_stage_if_image_not_exists(
-        self, tag_name: str, base_image: str, stage_hash: str, stage_instructions: list
-    ) -> None:
-        if not os.path.exists(CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{tag_name}.tar")):
-            logging.info(f"No tar found for tag {tag_name} ")
+        self, tag_name: str, base_image: str, stage_hash: str, stage_instructions: list, is_rebuild: bool
+    ) -> bool:
+        if is_rebuild or not os.path.exists(CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{tag_name}.tar")):
+            logging.info(f"No tar found for tag {tag_name} or build is forced by refresh")
             self.build_stage(base_image=base_image, image_name=stage_hash, stage_instructions=stage_instructions)
-            return
+            return True
 
         logging.info(f"Tar for tag {tag_name} already exists, skipping build stage... ")
+        return False
 
     def parse_stages(self) -> list:
         logging.info("Parsing stages from the dockerfile...")
 
         stages = []
         stage_instructions = []
+        stage_dependencies = set()
         stage_image_info = (None, None)
         stage_content = ''
 
@@ -352,29 +354,39 @@ class Chmoker:
                             {
                                 'image_info': stage_image_info,
                                 'instructions': stage_instructions,
+                                'dependencies': stage_dependencies,
                                 'content': stage_content,
                                 'hash': hashlib.sha256(stage_content.encode('UTF-8')).hexdigest(),
                             }
                         )
 
                         stage_instructions = []
+                        stage_dependencies = set()
                         stage_content = ''
 
                     stage_image_info = parser.image_from(instruction['value'])
+                    if stage_image_info[0] is not None:
+                        stage_dependencies.add(stage_image_info[0])
+
+                elif instruction['instruction'] == 'COPY':
+                    previous_stage, src, dst = instruction['value'].split()
+                    previous_stage = previous_stage.split("--from=")[1]
+                    stage_dependencies.add(previous_stage)
 
                 stage_content += instruction['content']
+
                 stage_instructions.append(instruction)
         else:
             stages.append(
                 {
                     'image_info': stage_image_info,
                     'instructions': stage_instructions,
+                    'dependencies': stage_dependencies,
                     'content': stage_content,
                     'hash': hashlib.sha256(stage_content.encode('UTF-8')).hexdigest(),
                     'is_last_stage': True,
                 }
             )
-
         logging.info(f"Parsed {len(stages)} stages from the dockerfile")
 
         return stages
@@ -383,10 +395,13 @@ class Chmoker:
         logging.info("Starting build process..")
 
         result_image_tag = self.args.tag
+        rebuild_stages = set()
 
         for stage in self.parse_stages():
             base_image, stage_name = stage['image_info']
             stage_current_hash = stage['hash']
+
+            is_rebuild = self.args.build_force_refresh or bool(stage['dependencies'] & rebuild_stages)
 
             logging.info(
                 f"Checking cache data for the stage with the image {base_image}, "
@@ -394,7 +409,7 @@ class Chmoker:
             )
 
             if not stage_name and not stage.get('is_last_stage', False):
-                if os.path.exists(CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{stage_current_hash}.tar")):
+                if os.path.exists(CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{stage_current_hash}.tar")) and not is_rebuild:
                     logging.info(
                         f"Nothing to rebuild for the stage with the image {base_image}, "
                         f" and hash {stage_current_hash}"
@@ -410,7 +425,7 @@ class Chmoker:
                     index_file_json = json.load(index_file)
                     stage_cache_data = index_file_json.get(stage_name)
 
-                    if stage_cache_data:
+                    if stage_cache_data and not is_rebuild:
                         if stage_cache_data['hash'] == stage_current_hash:
                             logging.info(
                                 f"Nothing to rebuild for the stage with the image {base_image}, "
@@ -436,12 +451,17 @@ class Chmoker:
 
                             continue
 
-                    self.build_stage_if_image_not_exists(
+                    is_stage_build = self.build_stage_if_image_not_exists(
                         tag_name=stage_current_hash,
                         base_image=base_image,
                         stage_hash=stage_current_hash,
                         stage_instructions=stage['instructions'],
+                        is_rebuild=is_rebuild
                     )
+
+                    if is_stage_build:
+                        rebuild_stages.add(stage_name)
+
                     self.save_cache_and_copy_stage(
                         file_data=index_file_json,
                         file_obj=index_file,
@@ -467,7 +487,7 @@ class Chmoker:
 
                     stage_cache_data = index_file_json.get(result_image_tag)
 
-                    if stage_cache_data:
+                    if stage_cache_data and not is_rebuild:
                         if stage_cache_data['hash'] == stage_current_hash:
                             logging.info(
                                 f"Nothing to rebuild for the stage with the image {base_image} "
@@ -481,6 +501,7 @@ class Chmoker:
                         base_image=base_image,
                         stage_hash=stage_current_hash,
                         stage_instructions=stage['instructions'],
+                        is_rebuild=is_rebuild
                     )
                     self.save_cache_and_copy_stage(
                         file_data=index_file_json,
@@ -507,15 +528,15 @@ class Chmoker:
         image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(image_name)
         image_tar_path = CHMOCKER_BASE_IMAGES_DIR_PATH / Path(f"{image_name}.tar")
 
-        self.unpack_image(base_image, image_name, force_refresh=self.args.build_force_refresh)
-        self.prepare_chroot(image_name)
-
         is_failed = False
 
         try:
+            self.unpack_image(base_image, image_name, force_refresh=self.args.build_force_refresh)
+            self.prepare_chroot(image_name)
+
             [self.parse_instr(image_name, x) for x in stage_instructions]
 
-        except Exception as error:
+        except (Exception, KeyboardInterrupt) as error:
             is_failed = True
             if os.path.exists(image_tar_path):
                 self.remove_recursive_force(image_tar_path)
@@ -600,8 +621,10 @@ class Chmoker:
         logging.info(f"Installing brew into {self.args.tag}")
         brew_install_cmd = 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
         self.prepare_chroot(self.args.tag)
-        self.exec_in_chroot(self.args.tag, brew_install_cmd)
-        self.destroy_chroot(self.args.tag)
+        try:
+            self.exec_in_chroot(self.args.tag, brew_install_cmd)
+        finally:
+            self.destroy_chroot(self.args.tag)
 
     def image_ls(self):
         images_dir_tar_items = sorted(os.listdir(CHMOCKER_BASE_IMAGES_DIR_PATH))
@@ -621,18 +644,31 @@ class Chmoker:
             self.image_ls()
 
     def run(self):
-        self.unpack_image(self.args.tag, self.args.tag, self.args.run_force_refresh)
-        self.prepare_chroot(self.args.tag)
-        self.exec_in_chroot(
-            self.args.tag,
-            self.args.command,
-            self.args.run_interactive,
-            self.args.run_extra_envs,
-        )
-        self.destroy_chroot(self.args.tag)
-        if self.args.run_remove_after:
-            image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
-            self.remove_recursive_force(image_mount_path)
+        image_mount_path = CHMOCKER_MOUNT_IMAGES_DIR_PATH / Path(self.args.tag)
+
+        try:
+            self.unpack_image(self.args.tag, self.args.tag, self.args.run_force_refresh)
+            self.prepare_chroot(self.args.tag)
+            self.exec_in_chroot(
+                self.args.tag,
+                self.args.command,
+                self.args.run_interactive,
+                self.args.run_extra_envs,
+            )
+
+        except (Exception, KeyboardInterrupt) as error:
+            if os.path.exists(image_mount_path):
+                self.remove_recursive_force(image_mount_path)
+
+            logging.exception(
+                f"Exception occurred running image with the base image {self.args.tag} and " f"image name {self.args.tag}"
+            )
+            raise error
+
+        finally:
+            self.destroy_chroot(self.args.tag)
+            if self.args.run_remove_after:
+                self.remove_recursive_force(image_mount_path)
 
     def main(self):
         if self.args.action == "build":
