@@ -20,6 +20,12 @@ classifiers = [
     "Operating System :: MacOS",
 ]
 
+dependencies = [
+    "dockerfile-parse==2.0.1",
+    "validators==0.22.0",
+    "termcolor==2.4.0",
+]
+
 [project.urls]
 homepage = "https://github.com/flipperdevices/chmocker"
 documentation = "https://github.com/flipperdevices/chmocker"
